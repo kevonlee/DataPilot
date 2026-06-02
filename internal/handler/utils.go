@@ -1,27 +1,26 @@
 package handler
 
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"strconv"
+	"time"
+)
 
 func timeNow() time.Time {
 	return time.Now()
 }
 
 func itoa(i int) string {
-	if i == 0 {
-		return "0"
+	return strconv.Itoa(i)
+}
+
+func randomString(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+		b[i] = letters[idx.Int64()]
 	}
-	s := ""
-	neg := false
-	if i < 0 {
-		neg = true
-		i = -i
-	}
-	for i > 0 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
+	return string(b)
 }

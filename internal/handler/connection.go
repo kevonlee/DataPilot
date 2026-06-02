@@ -115,13 +115,3 @@ func handleTestConnection(w http.ResponseWriter, r *http.Request, id string) {
 func generateID() string {
 	return time.Now().Format("20060102150405") + randomString(6)
 }
-
-func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
-		time.Sleep(1) // ensure different values
-	}
-	return string(b)
-}

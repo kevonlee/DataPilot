@@ -3,10 +3,13 @@ package config
 import (
 	"database-manager/internal/model"
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Config struct {
@@ -24,6 +27,15 @@ var (
 	once         sync.Once
 )
 
+func generateSecret(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
+}
+
 func Init(dataDir string) (*Config, error) {
 	var initErr error
 	once.Do(func() {
@@ -34,17 +46,22 @@ func Init(dataDir string) (*Config, error) {
 		cfg := &Config{
 			DataDir:   dataDir,
 			Port:      9090,
-			JWTSecret: "db-manager-secret-key-change-me",
+			JWTSecret: generateSecret(32),
 		}
 		cfgFile := filepath.Join(dataDir, "config.json")
 		if data, err := os.ReadFile(cfgFile); err == nil {
 			json.Unmarshal(data, cfg)
 		}
+		// auto-generate JWT secret if empty or default
+		if cfg.JWTSecret == "" || cfg.JWTSecret == "db-manager-secret-key-change-me" {
+			cfg.JWTSecret = generateSecret(32)
+		}
 		// default admin user
 		if cfg.User.Username == "" {
+			hash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 			cfg.User = model.User{
 				Username:  "admin",
-				Password:  "admin",
+				Password:  string(hash),
 				CreatedAt: timeNow(),
 			}
 		}
@@ -64,10 +81,9 @@ func Get() *Config {
 	return globalConfig
 }
 
+// save persists config to disk. Caller must hold at least RLock.
 func (c *Config) save() error {
-	c.mu.RLock()
 	data, err := json.MarshalIndent(c, "", "  ")
-	c.mu.RUnlock()
 	if err != nil {
 		return err
 	}
@@ -103,42 +119,42 @@ func (c *Config) GetConnection(id string) *model.Connection {
 
 func (c *Config) AddConnection(conn model.Connection) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Connections = append(c.Connections, conn)
-	c.mu.Unlock()
 	return c.save()
 }
 
 func (c *Config) UpdateConnection(conn model.Connection) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	for i := range c.Connections {
 		if c.Connections[i].ID == conn.ID {
 			c.Connections[i] = conn
 			break
 		}
 	}
-	c.mu.Unlock()
 	return c.save()
 }
 
 func (c *Config) DeleteConnection(id string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	for i := range c.Connections {
 		if c.Connections[i].ID == id {
 			c.Connections = append(c.Connections[:i], c.Connections[i+1:]...)
 			break
 		}
 	}
-	c.mu.Unlock()
 	return c.save()
 }
 
 func (c *Config) AddHistory(h model.QueryHistory) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.History = append([]model.QueryHistory{h}, c.History...)
 	if len(c.History) > 1000 {
 		c.History = c.History[:1000]
 	}
-	c.mu.Unlock()
 	c.save()
 }
 
@@ -159,4 +175,22 @@ func (c *Config) GetHistory(connID string, limit int) []model.QueryHistory {
 
 func timeNow() time.Time {
 	return time.Now()
+}
+
+// CheckPassword verifies a plaintext password against the stored bcrypt hash.
+func (c *Config) CheckPassword(plaintext string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(c.User.Password), []byte(plaintext))
+	return err == nil
+}
+
+// SetPassword hashes and stores a new password.
+func (c *Config) SetPassword(plaintext string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.User.Password = string(hash)
+	c.mu.Unlock()
+	return c.Save()
 }

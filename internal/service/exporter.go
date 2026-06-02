@@ -61,7 +61,7 @@ func ExportToSQL(result *QueryResult, tableName string) ([]byte, error) {
 				} else {
 					switch v := row[j].(type) {
 					case string:
-						vals = append(vals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "\\'")))
+						vals = append(vals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
 					case float64, float32, int, int64, int32:
 						vals = append(vals, fmt.Sprintf("%v", v))
 					default:

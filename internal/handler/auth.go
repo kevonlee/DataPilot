@@ -23,7 +23,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := config.Get()
-	if req.Username != cfg.User.Username || req.Password != cfg.User.Password {
+	if req.Username != cfg.User.Username {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		return
+	}
+
+	if !cfg.CheckPassword(req.Password) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
@@ -55,14 +60,21 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.NewPassword) < 4 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password must be at least 4 characters"})
+		return
+	}
+
 	cfg := config.Get()
-	if req.OldPassword != cfg.User.Password {
+	if !cfg.CheckPassword(req.OldPassword) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid old password"})
 		return
 	}
 
-	cfg.User.Password = req.NewPassword
-	cfg.Save()
+	if err := cfg.SetPassword(req.NewPassword); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save password"})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "password changed"})
 }

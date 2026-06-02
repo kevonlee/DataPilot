@@ -59,7 +59,8 @@ func ExecuteQuery(db *sql.DB, query string) *QueryResult {
 				ptrs[i] = &values[i]
 			}
 			if err := rows.Scan(ptrs...); err != nil {
-				continue
+				result.Error = err.Error()
+				break
 			}
 			// convert []byte to string
 			row := make([]interface{}, len(values))
@@ -71,6 +72,9 @@ func ExecuteQuery(db *sql.DB, query string) *QueryResult {
 				}
 			}
 			result.Rows = append(result.Rows, row)
+		}
+		if err := rows.Err(); err != nil {
+			result.Error = err.Error()
 		}
 	} else {
 		res, err := db.Exec(query)
@@ -119,7 +123,7 @@ func GetDatabases(db *sql.DB, dbType string) ([]string, error) {
 		}
 		databases = append(databases, name)
 	}
-	return databases, nil
+	return databases, rows.Err()
 }
 
 // GetTables returns list of tables for the given database
@@ -154,7 +158,7 @@ func GetTables(db *sql.DB, dbType string) ([]string, error) {
 		}
 		tables = append(tables, name)
 	}
-	return tables, nil
+	return tables, rows.Err()
 }
 
 type ColumnInfo struct {
@@ -169,46 +173,22 @@ type ColumnInfo struct {
 
 // GetColumns returns column information for the given table
 func GetColumns(db *sql.DB, dbType, tableName string) ([]ColumnInfo, error) {
+	if err := ValidateIdentifier(tableName); err != nil {
+		return nil, err
+	}
+
 	var query string
 	switch dbType {
 	case "mysql":
-		query = fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`", tableName)
+		query = "SHOW FULL COLUMNS FROM `" + tableName + "`"
 	case "postgresql":
-		query = fmt.Sprintf(`
-			SELECT column_name, data_type,
-				CASE WHEN is_nullable = 'YES' THEN 'YES' ELSE 'NO' END,
-				CASE WHEN column_name IN (
-					SELECT column_name FROM information_schema.table_constraints tc
-					JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-					WHERE tc.table_name = '%s' AND tc.constraint_type = 'PRIMARY KEY'
-				) THEN 'PRI' ELSE '' END,
-				column_default, '', ''
-			FROM information_schema.columns WHERE table_name = '%s' ORDER BY ordinal_position`, tableName, tableName)
+		return getColumnsPG(db, tableName)
 	case "sqlite":
-		query = fmt.Sprintf("PRAGMA table_info('%s')", tableName)
+		query = "PRAGMA table_info('" + tableName + "')"
 	case "sqlserver":
-		query = fmt.Sprintf(`
-			SELECT c.COLUMN_NAME, c.DATA_TYPE,
-				CASE WHEN c.IS_NULLABLE = 'YES' THEN 'YES' ELSE 'NO' END,
-				CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 'PRI' ELSE '' END,
-				c.COLUMN_DEFAULT, '', ''
-			FROM INFORMATION_SCHEMA.COLUMNS c
-			LEFT JOIN (
-				SELECT ku.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-				JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
-				WHERE tc.TABLE_NAME = '%s' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-			) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
-			WHERE c.TABLE_NAME = '%s' ORDER BY c.ORDINAL_POSITION`, tableName, tableName)
+		return getColumnsSQLServer(db, tableName)
 	case "oracle":
-		query = fmt.Sprintf(`
-			SELECT COLUMN_NAME, DATA_TYPE, NULLABLE,
-				CASE WHEN COLUMN_NAME IN (
-					SELECT COLUMN_NAME FROM USER_CONSOLUMNS WHERE CONSTRAINT_NAME IN (
-						SELECT CONSTRAINT_NAME FROM USER_CONSTRAINTS WHERE TABLE_NAME = '%s' AND CONSTRAINT_TYPE = 'P'
-					)
-				) THEN 'PRI' ELSE '' END,
-				DATA_DEFAULT, '', ''
-			FROM USER_TAB_COLUMNS WHERE TABLE_NAME = '%s' ORDER BY COLUMN_ID`, tableName, tableName)
+		return getColumnsOracle(db, tableName)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}
@@ -227,10 +207,13 @@ func GetColumns(db *sql.DB, dbType, tableName string) ([]ColumnInfo, error) {
 		}
 		columns = append(columns, col)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	// for SQLite, parse the PRAGMA result differently
 	if dbType == "sqlite" && len(columns) == 0 {
-		rows2, err := db.Query(fmt.Sprintf("PRAGMA table_info('%s')", tableName))
+		rows2, err := db.Query("PRAGMA table_info('" + tableName + "')")
 		if err != nil {
 			return nil, err
 		}
@@ -260,9 +243,94 @@ func GetColumns(db *sql.DB, dbType, tableName string) ([]ColumnInfo, error) {
 				DefaultValue: dfltValue,
 			})
 		}
+		if err := rows2.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	return columns, nil
+}
+
+func getColumnsPG(db *sql.DB, tableName string) ([]ColumnInfo, error) {
+	rows, err := db.Query(`
+		SELECT column_name, data_type,
+			CASE WHEN is_nullable = 'YES' THEN 'YES' ELSE 'NO' END,
+			CASE WHEN column_name IN (
+				SELECT column_name FROM information_schema.table_constraints tc
+				JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+				WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'
+			) THEN 'PRI' ELSE '' END,
+			column_default, '', ''
+		FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []ColumnInfo
+	for rows.Next() {
+		var col ColumnInfo
+		if err := rows.Scan(&col.Name, &col.Type, &col.Nullable, &col.Key, &col.DefaultValue, &col.Extra, &col.Comment); err != nil {
+			continue
+		}
+		columns = append(columns, col)
+	}
+	return columns, rows.Err()
+}
+
+func getColumnsSQLServer(db *sql.DB, tableName string) ([]ColumnInfo, error) {
+	rows, err := db.Query(`
+		SELECT c.COLUMN_NAME, c.DATA_TYPE,
+			CASE WHEN c.IS_NULLABLE = 'YES' THEN 'YES' ELSE 'NO' END,
+			CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 'PRI' ELSE '' END,
+			c.COLUMN_DEFAULT, '', ''
+		FROM INFORMATION_SCHEMA.COLUMNS c
+		LEFT JOIN (
+			SELECT ku.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+			JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
+			WHERE ku.TABLE_NAME = @p1 AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+		) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
+		WHERE c.TABLE_NAME = @p1 ORDER BY c.ORDINAL_POSITION`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []ColumnInfo
+	for rows.Next() {
+		var col ColumnInfo
+		if err := rows.Scan(&col.Name, &col.Type, &col.Nullable, &col.Key, &col.DefaultValue, &col.Extra, &col.Comment); err != nil {
+			continue
+		}
+		columns = append(columns, col)
+	}
+	return columns, rows.Err()
+}
+
+func getColumnsOracle(db *sql.DB, tableName string) ([]ColumnInfo, error) {
+	rows, err := db.Query(`
+		SELECT COLUMN_NAME, DATA_TYPE, NULLABLE,
+			CASE WHEN COLUMN_NAME IN (
+				SELECT COLUMN_NAME FROM USER_CONS_COLUMNS WHERE CONSTRAINT_NAME IN (
+					SELECT CONSTRAINT_NAME FROM USER_CONSTRAINTS WHERE TABLE_NAME = :1 AND CONSTRAINT_TYPE = 'P'
+				)
+			) THEN 'PRI' ELSE '' END,
+			DATA_DEFAULT, '', ''
+		FROM USER_TAB_COLUMNS WHERE TABLE_NAME = :1 ORDER BY COLUMN_ID`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []ColumnInfo
+	for rows.Next() {
+		var col ColumnInfo
+		if err := rows.Scan(&col.Name, &col.Type, &col.Nullable, &col.Key, &col.DefaultValue, &col.Extra, &col.Comment); err != nil {
+			continue
+		}
+		columns = append(columns, col)
+	}
+	return columns, rows.Err()
 }
 
 type IndexInfo struct {
@@ -274,24 +342,20 @@ type IndexInfo struct {
 
 // GetIndexes returns index information for the given table
 func GetIndexes(db *sql.DB, dbType, tableName string) ([]IndexInfo, error) {
+	if err := ValidateIdentifier(tableName); err != nil {
+		return nil, err
+	}
+
 	var query string
 	switch dbType {
 	case "mysql":
-		query = fmt.Sprintf("SHOW INDEX FROM `%s`", tableName)
+		query = "SHOW INDEX FROM `" + tableName + "`"
 	case "postgresql":
-		query = fmt.Sprintf(`
-			SELECT indexname, indexdef FROM pg_indexes
-			WHERE tablename = '%s' AND schemaname = 'public'`, tableName)
+		return getIndexesPG(db, tableName)
 	case "sqlite":
-		query = fmt.Sprintf("PRAGMA index_list('%s')", tableName)
+		query = "PRAGMA index_list('" + tableName + "')"
 	case "sqlserver":
-		query = fmt.Sprintf(`
-			SELECT i.name, i.is_unique, i.is_primary_key, c.name as col_name
-			FROM sys.indexes i
-			JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-			JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-			WHERE i.object_id = OBJECT_ID('%s') AND i.type > 0
-			ORDER BY i.name, ic.key_ordinal`, tableName)
+		return getIndexesSQLServer(db, tableName)
 	default:
 		return nil, nil
 	}
@@ -344,15 +408,73 @@ func GetIndexes(db *sql.DB, dbType, tableName string) ([]IndexInfo, error) {
 				Unique:  unique == 1,
 			}
 		}
-	default:
-		for rows.Next() {
-			var name string
-			var extra string
-			if err := rows.Scan(&name, &extra); err != nil {
-				continue
-			}
-			indexMap[name] = &IndexInfo{Name: name, Columns: []string{}}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var indexes []IndexInfo
+	for _, idx := range indexMap {
+		indexes = append(indexes, *idx)
+	}
+	return indexes, nil
+}
+
+func getIndexesPG(db *sql.DB, tableName string) ([]IndexInfo, error) {
+	rows, err := db.Query(`
+		SELECT indexname, indexdef FROM pg_indexes
+		WHERE tablename = $1 AND schemaname = 'public'`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var indexes []IndexInfo
+	for rows.Next() {
+		var name, def string
+		if err := rows.Scan(&name, &def); err != nil {
+			continue
 		}
+		indexes = append(indexes, IndexInfo{Name: name, Columns: []string{}})
+	}
+	return indexes, rows.Err()
+}
+
+func getIndexesSQLServer(db *sql.DB, tableName string) ([]IndexInfo, error) {
+	rows, err := db.Query(`
+		SELECT i.name, i.is_unique, i.is_primary_key, c.name as col_name
+		FROM sys.indexes i
+		JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+		JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+		WHERE i.object_id = OBJECT_ID(@p1) AND i.type > 0
+		ORDER BY i.name, ic.key_ordinal`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	indexMap := make(map[string]*IndexInfo)
+	for rows.Next() {
+		var name string
+		var isUnique, isPK bool
+		var colName string
+		if err := rows.Scan(&name, &isUnique, &isPK, &colName); err != nil {
+			continue
+		}
+		if idx, ok := indexMap[name]; ok {
+			idx.Columns = append(idx.Columns, colName)
+		} else {
+			indexMap[name] = &IndexInfo{
+				Name:    name,
+				Columns: []string{colName},
+				Unique:  isUnique,
+				Primary: isPK,
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	var indexes []IndexInfo
@@ -363,7 +485,7 @@ func GetIndexes(db *sql.DB, dbType, tableName string) ([]IndexInfo, error) {
 }
 
 func getIndexColumns(db *sql.DB, indexName string) ([]string, error) {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA index_info('%s')", indexName))
+	rows, err := db.Query("PRAGMA index_info('" + indexName + "')")
 	if err != nil {
 		return nil, err
 	}
@@ -378,26 +500,30 @@ func getIndexColumns(db *sql.DB, indexName string) ([]string, error) {
 		}
 		cols = append(cols, name)
 	}
-	return cols, nil
+	return cols, rows.Err()
 }
 
 // GetDDL returns the DDL (CREATE TABLE statement) for the given table
 func GetDDL(db *sql.DB, dbType, tableName string) (string, error) {
+	if err := ValidateIdentifier(tableName); err != nil {
+		return "", err
+	}
+
 	switch dbType {
 	case "mysql":
 		var table, createSQL string
-		err := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)).Scan(&table, &createSQL)
+		err := db.QueryRow("SHOW CREATE TABLE `" + tableName + "`").Scan(&table, &createSQL)
 		if err != nil {
 			return "", err
 		}
 		return createSQL, nil
 	case "sqlite":
-		var sql string
-		err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&sql)
+		var ddl string
+		err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&ddl)
 		if err != nil {
 			return "", err
 		}
-		return sql, nil
+		return ddl, nil
 	case "postgresql":
 		// Build DDL from columns
 		cols, err := GetColumns(db, dbType, tableName)
@@ -405,14 +531,36 @@ func GetDDL(db *sql.DB, dbType, tableName string) (string, error) {
 			return "", err
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", tableName))
+		sb.WriteString("CREATE TABLE \"" + tableName + "\" (\n")
 		for i, col := range cols {
-			sb.WriteString(fmt.Sprintf("    %s %s", col.Name, col.Type))
+			sb.WriteString("    \"" + col.Name + "\" " + col.Type)
 			if col.Nullable == "NO" {
 				sb.WriteString(" NOT NULL")
 			}
 			if col.DefaultValue != nil {
-				sb.WriteString(fmt.Sprintf(" DEFAULT %s", *col.DefaultValue))
+				sb.WriteString(" DEFAULT " + *col.DefaultValue)
+			}
+			if i < len(cols)-1 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString(");")
+		return sb.String(), nil
+	case "sqlserver":
+		cols, err := GetColumns(db, dbType, tableName)
+		if err != nil {
+			return "", err
+		}
+		var sb strings.Builder
+		sb.WriteString("CREATE TABLE [" + tableName + "] (\n")
+		for i, col := range cols {
+			sb.WriteString("    [" + col.Name + "] " + col.Type)
+			if col.Nullable == "NO" {
+				sb.WriteString(" NOT NULL")
+			}
+			if col.DefaultValue != nil {
+				sb.WriteString(" DEFAULT " + *col.DefaultValue)
 			}
 			if i < len(cols)-1 {
 				sb.WriteString(",")

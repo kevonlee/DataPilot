@@ -57,6 +57,10 @@ func handleDBRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dbName := parts[2]
+	if err := service.ValidateIdentifier(dbName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid database name"})
+		return
+	}
 
 	db, err := dbm.SwitchDatabase(conn, dbName)
 	if err != nil {
@@ -125,6 +129,11 @@ func handleDBRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleTableDataRoute(w http.ResponseWriter, r *http.Request, db *sql.DB, tableName string, dbType model.DBType) {
+	if err := service.ValidateIdentifier(tableName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid table name"})
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		page := 1
@@ -135,13 +144,20 @@ func handleTableDataRoute(w http.ResponseWriter, r *http.Request, db *sql.DB, ta
 		if ps := r.URL.Query().Get("pageSize"); ps != "" {
 			json.Unmarshal([]byte(ps), &pageSize)
 		}
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 1000 {
+			pageSize = 50
+		}
 
+		quoted := service.QuoteIdentifier(tableName, string(dbType))
 		offset := (page - 1) * pageSize
-		query := "SELECT * FROM `" + tableName + "` LIMIT " + itoa(pageSize) + " OFFSET " + itoa(offset)
+		query := "SELECT * FROM " + quoted + " LIMIT " + itoa(pageSize) + " OFFSET " + itoa(offset)
 		result := service.ExecuteQuery(db, query)
 
 		// get total count
-		countResult := service.ExecuteQuery(db, "SELECT COUNT(*) FROM `"+tableName+"`")
+		countResult := service.ExecuteQuery(db, "SELECT COUNT(*) FROM "+quoted)
 		total := int64(0)
 		if countResult.Error == "" && len(countResult.Rows) > 0 {
 			if v, ok := countResult.Rows[0][0].(int64); ok {
@@ -177,12 +193,17 @@ func handleInsertRow(w http.ResponseWriter, r *http.Request, db *sql.DB, tableNa
 		return
 	}
 
+	quoted := service.QuoteIdentifier(tableName, string(dbType))
 	var cols []string
 	var vals []interface{}
 	var placeholders []string
 	i := 0
 	for k, v := range req {
-		cols = append(cols, "`"+k+"`")
+		if err := service.ValidateIdentifier(k); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid column name: " + k})
+			return
+		}
+		cols = append(cols, service.QuoteIdentifier(k, string(dbType)))
 		vals = append(vals, v)
 		if dbType == model.DBTypePostgreSQL {
 			placeholders = append(placeholders, "$"+itoa(i+1))
@@ -192,7 +213,7 @@ func handleInsertRow(w http.ResponseWriter, r *http.Request, db *sql.DB, tableNa
 		i++
 	}
 
-	query := "INSERT INTO `" + tableName + "` (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ")"
+	query := "INSERT INTO " + quoted + " (" + strings.Join(cols, ", ") + ") VALUES (" + strings.Join(placeholders, ", ") + ")"
 	_, err := db.Exec(query, vals...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -212,14 +233,20 @@ func handleUpdateRow(w http.ResponseWriter, r *http.Request, db *sql.DB, tableNa
 		return
 	}
 
+	quoted := service.QuoteIdentifier(tableName, string(dbType))
 	var setClauses []string
 	var args []interface{}
 	i := 0
 	for k, v := range req.Set {
+		if err := service.ValidateIdentifier(k); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid column name: " + k})
+			return
+		}
+		col := service.QuoteIdentifier(k, string(dbType))
 		if dbType == model.DBTypePostgreSQL {
-			setClauses = append(setClauses, "`"+k+"` = $"+itoa(i+1))
+			setClauses = append(setClauses, col+" = $"+itoa(i+1))
 		} else {
-			setClauses = append(setClauses, "`"+k+"` = ?")
+			setClauses = append(setClauses, col+" = ?")
 		}
 		args = append(args, v)
 		i++
@@ -227,16 +254,26 @@ func handleUpdateRow(w http.ResponseWriter, r *http.Request, db *sql.DB, tableNa
 
 	var whereClauses []string
 	for k, v := range req.Where {
+		if err := service.ValidateIdentifier(k); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid column name: " + k})
+			return
+		}
+		col := service.QuoteIdentifier(k, string(dbType))
 		if dbType == model.DBTypePostgreSQL {
-			whereClauses = append(whereClauses, "`"+k+"` = $"+itoa(i+1))
+			whereClauses = append(whereClauses, col+" = $"+itoa(i+1))
 		} else {
-			whereClauses = append(whereClauses, "`"+k+"` = ?")
+			whereClauses = append(whereClauses, col+" = ?")
 		}
 		args = append(args, v)
 		i++
 	}
 
-	query := "UPDATE `" + tableName + "` SET " + strings.Join(setClauses, ", ") + " WHERE " + strings.Join(whereClauses, " AND ")
+	if len(whereClauses) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "WHERE clause required for UPDATE"})
+		return
+	}
+
+	query := "UPDATE " + quoted + " SET " + strings.Join(setClauses, ", ") + " WHERE " + strings.Join(whereClauses, " AND ")
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -253,20 +290,31 @@ func handleDeleteRow(w http.ResponseWriter, r *http.Request, db *sql.DB, tableNa
 		return
 	}
 
+	if len(req) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "WHERE clause required for DELETE"})
+		return
+	}
+
+	quoted := service.QuoteIdentifier(tableName, string(dbType))
 	var whereClauses []string
 	var args []interface{}
 	i := 0
 	for k, v := range req {
+		if err := service.ValidateIdentifier(k); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid column name: " + k})
+			return
+		}
+		col := service.QuoteIdentifier(k, string(dbType))
 		if dbType == model.DBTypePostgreSQL {
-			whereClauses = append(whereClauses, "`"+k+"` = $"+itoa(i+1))
+			whereClauses = append(whereClauses, col+" = $"+itoa(i+1))
 		} else {
-			whereClauses = append(whereClauses, "`"+k+"` = ?")
+			whereClauses = append(whereClauses, col+" = ?")
 		}
 		args = append(args, v)
 		i++
 	}
 
-	query := "DELETE FROM `" + tableName + "` WHERE " + strings.Join(whereClauses, " AND ")
+	query := "DELETE FROM " + quoted + " WHERE " + strings.Join(whereClauses, " AND ")
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -282,6 +330,11 @@ func handleExportRoute(w http.ResponseWriter, r *http.Request, db *sql.DB, table
 		return
 	}
 
+	if err := service.ValidateIdentifier(tableName); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid table name"})
+		return
+	}
+
 	var req struct {
 		Format string `json:"format"` // csv, json, sql
 	}
@@ -290,7 +343,8 @@ func handleExportRoute(w http.ResponseWriter, r *http.Request, db *sql.DB, table
 		return
 	}
 
-	query := "SELECT * FROM `" + tableName + "`"
+	quoted := service.QuoteIdentifier(tableName, string(dbType))
+	query := "SELECT * FROM " + quoted
 	result := service.ExecuteQuery(db, query)
 	if result.Error != "" {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": result.Error})

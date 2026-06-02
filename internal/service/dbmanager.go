@@ -30,19 +30,33 @@ func GetDBManager() *DBManager {
 	return dbManager
 }
 
+// poolKey returns a unique key for the connection + database combination.
+func poolKey(connID, dbName string) string {
+	if dbName == "" {
+		return connID
+	}
+	return connID + "/" + dbName
+}
+
 func (m *DBManager) Get(conn *model.Connection) (*sql.DB, error) {
+	key := poolKey(conn.ID, conn.Database)
+
 	m.mu.RLock()
-	if db, ok := m.pools[conn.ID]; ok {
-		m.mu.RUnlock()
+	db, ok := m.pools[key]
+	m.mu.RUnlock()
+
+	if ok {
 		if err := db.Ping(); err == nil {
 			return db, nil
 		}
-		// connection stale, remove and reconnect
+		// stale connection - remove it
 		m.mu.Lock()
-		delete(m.pools, conn.ID)
+		// re-check under write lock
+		if m.pools[key] == db {
+			db.Close()
+			delete(m.pools, key)
+		}
 		m.mu.Unlock()
-	} else {
-		m.mu.RUnlock()
 	}
 
 	return m.connect(conn)
@@ -72,8 +86,13 @@ func (m *DBManager) connect(conn *model.Connection) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping failed: %w", err)
 	}
 
+	key := poolKey(conn.ID, conn.Database)
 	m.mu.Lock()
-	m.pools[conn.ID] = db
+	// close any existing connection for this key
+	if old, ok := m.pools[key]; ok {
+		old.Close()
+	}
+	m.pools[key] = db
 	m.mu.Unlock()
 
 	return db, nil
@@ -81,9 +100,11 @@ func (m *DBManager) connect(conn *model.Connection) (*sql.DB, error) {
 
 func (m *DBManager) Close(connID string) {
 	m.mu.Lock()
-	if db, ok := m.pools[connID]; ok {
-		db.Close()
-		delete(m.pools, connID)
+	for key, db := range m.pools {
+		if key == connID || (len(key) > len(connID)+1 && key[:len(connID)+1] == connID+"/") {
+			db.Close()
+			delete(m.pools, key)
+		}
 	}
 	m.mu.Unlock()
 }
@@ -117,40 +138,11 @@ func (m *DBManager) Test(conn *model.Connection) error {
 	return db.Ping()
 }
 
-// SwitchDatabase switches the connection to a different database
+// SwitchDatabase returns a connection for the specified database.
+// Uses per-database pool keys so connections are not shared across databases.
 func (m *DBManager) SwitchDatabase(conn *model.Connection, dbName string) (*sql.DB, error) {
-	db, err := m.Get(conn)
-	if err != nil {
-		return nil, err
-	}
-
-	// For SQLite, no need to switch
-	if conn.Type == model.DBTypeSQLite {
-		return db, nil
-	}
-
-	// Execute USE database command for SQL databases
-	var useSQL string
-	switch conn.Type {
-	case model.DBTypeMySQL, model.DBTypeSQLServer:
-		useSQL = "USE `" + dbName + "`"
-	case model.DBTypePostgreSQL:
-		// PostgreSQL doesn't support USE, need new connection
-		newConn := *conn
-		newConn.Database = dbName
-		return m.connect(&newConn)
-	case model.DBTypeOracle:
-		// Oracle uses schemas, not USE
-		return db, nil
-	default:
-		useSQL = "USE `" + dbName + "`"
-	}
-
-	if useSQL != "" {
-		if _, err := db.Exec(useSQL); err != nil {
-			return nil, fmt.Errorf("switch database failed: %w", err)
-		}
-	}
-
-	return db, nil
+	// Create a copy with the target database
+	switchConn := *conn
+	switchConn.Database = dbName
+	return m.Get(&switchConn)
 }
