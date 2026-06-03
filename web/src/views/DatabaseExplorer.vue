@@ -288,6 +288,9 @@ function setContext(data) {
 
 function handleNodeClick(data) {
   setContext(data)
+  if (data.type === 'table') {
+    emit('navigate', 'table-data')
+  }
 }
 
 function handleNodeDblClick(data) {

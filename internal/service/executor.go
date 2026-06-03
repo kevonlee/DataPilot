@@ -180,7 +180,7 @@ func GetColumns(db *sql.DB, dbType, tableName string) ([]ColumnInfo, error) {
 	var query string
 	switch dbType {
 	case "mysql":
-		query = "SHOW FULL COLUMNS FROM `" + tableName + "`"
+		query = "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '" + tableName + "' ORDER BY ORDINAL_POSITION"
 	case "postgresql":
 		return getColumnsPG(db, tableName)
 	case "sqlite":
