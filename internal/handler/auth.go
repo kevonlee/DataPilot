@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database-manager/internal/config"
+	"database-manager/internal/logger"
 	"database-manager/internal/middleware"
 	"encoding/json"
 	"net/http"
@@ -24,21 +25,25 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	cfg := config.Get()
 	if req.Username != cfg.User.Username {
+		logger.Warn("Login failed: unknown user '%s' from %s", req.Username, r.RemoteAddr)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
 
 	if !cfg.CheckPassword(req.Password) {
+		logger.Warn("Login failed: wrong password for user '%s' from %s", req.Username, r.RemoteAddr)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
 
 	token, err := middleware.GenerateToken(cfg.JWTSecret, req.Username)
 	if err != nil {
+		logger.Error("Failed to generate token for user '%s': %v", req.Username, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
 		return
 	}
 
+	logger.Info("User '%s' logged in from %s", req.Username, r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token":    token,
 		"username": req.Username,

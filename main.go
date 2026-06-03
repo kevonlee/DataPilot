@@ -3,11 +3,11 @@ package main
 import (
 	"database-manager/internal/config"
 	"database-manager/internal/handler"
+	"database-manager/internal/logger"
 	"database-manager/internal/service"
 	"embed"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,13 +26,15 @@ func main() {
 
 	cfg, err := config.Init(dataDir)
 	if err != nil {
-		log.Fatalf("Failed to initialize config: %v", err)
+		logger.Error("Failed to initialize config: %v", err)
+		os.Exit(1)
 	}
 
 	// get embedded web files
 	webRoot, err := fs.Sub(webFS, "web/dist")
 	if err != nil {
-		log.Fatalf("Failed to access web files: %v", err)
+		logger.Error("Failed to access web files: %v", err)
+		os.Exit(1)
 	}
 
 	// create router
@@ -45,8 +47,8 @@ func main() {
 	}
 
 	addr := fmt.Sprintf(":%d", port)
-	fmt.Printf("Database Manager started at http://localhost%s\n", addr)
-	fmt.Println("Default login: admin / admin")
+	logger.Info("Database Manager started at http://localhost%s", addr)
+	logger.Info("Default login: admin / admin")
 
 	// open browser
 	go openBrowser(fmt.Sprintf("http://localhost%s", addr))
@@ -55,7 +57,11 @@ func main() {
 	defer service.GetDBManager().CloseAll()
 
 	// start server
-	log.Fatal(http.ListenAndServe(addr, mux))
+	logger.Info("HTTP server listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		logger.Error("HTTP server error: %v", err)
+		os.Exit(1)
+	}
 }
 
 func openBrowser(url string) {

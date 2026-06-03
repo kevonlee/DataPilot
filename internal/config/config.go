@@ -1,11 +1,13 @@
 package config
 
 import (
+	"database-manager/internal/logger"
 	"database-manager/internal/model"
 	"encoding/json"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +18,7 @@ type Config struct {
 	mu          sync.RWMutex
 	DataDir     string              `json:"-"`
 	Port        int                 `json:"port"`
+	LogLevel    string              `json:"logLevel"`
 	JWTSecret   string              `json:"jwtSecret"`
 	User        model.User          `json:"user"`
 	Connections []model.Connection  `json:"connections"`
@@ -46,16 +49,24 @@ func Init(dataDir string) (*Config, error) {
 		cfg := &Config{
 			DataDir:   dataDir,
 			Port:      9090,
+			LogLevel:  "info",
 			JWTSecret: generateSecret(32),
 		}
 		cfgFile := filepath.Join(dataDir, "config.json")
 		if data, err := os.ReadFile(cfgFile); err == nil {
 			json.Unmarshal(data, cfg)
 		}
+
+		// apply log level
+		if cfg.LogLevel != "" {
+			logger.SetLevel(cfg.LogLevel)
+		}
+
 		// auto-generate JWT secret if empty or default
 		if cfg.JWTSecret == "" || cfg.JWTSecret == "db-manager-secret-key-change-me" {
 			cfg.JWTSecret = generateSecret(32)
 		}
+
 		// default admin user
 		if cfg.User.Username == "" {
 			hash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
@@ -65,6 +76,16 @@ func Init(dataDir string) (*Config, error) {
 				CreatedAt: timeNow(),
 			}
 		}
+
+		// migrate plaintext password to bcrypt
+		if cfg.User.Password != "" && !strings.HasPrefix(cfg.User.Password, "$2") {
+			logger.Info("Migrating plaintext password to bcrypt")
+			hash, err := bcrypt.GenerateFromPassword([]byte(cfg.User.Password), bcrypt.DefaultCost)
+			if err == nil {
+				cfg.User.Password = string(hash)
+			}
+		}
+
 		if cfg.Connections == nil {
 			cfg.Connections = []model.Connection{}
 		}
@@ -73,6 +94,7 @@ func Init(dataDir string) (*Config, error) {
 		}
 		cfg.save()
 		globalConfig = cfg
+		logger.Info("Config loaded from %s, port=%d, logLevel=%s", dataDir, cfg.Port, cfg.LogLevel)
 	})
 	return globalConfig, initErr
 }

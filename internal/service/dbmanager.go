@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database-manager/internal/logger"
 	"database-manager/internal/model"
 	"database/sql"
 	"fmt"
@@ -73,8 +74,10 @@ func (m *DBManager) connect(conn *model.Connection) (*sql.DB, error) {
 		driverName = "sqlserver"
 	}
 
+	logger.Info("Connecting to %s database '%s' (conn=%s)", conn.Type, conn.Database, conn.ID)
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
+		logger.Error("Failed to open %s connection: %v", conn.Type, err)
 		return nil, fmt.Errorf("connect failed: %w", err)
 	}
 
@@ -83,6 +86,7 @@ func (m *DBManager) connect(conn *model.Connection) (*sql.DB, error) {
 
 	if err := db.Ping(); err != nil {
 		db.Close()
+		logger.Error("Failed to ping %s database: %v", conn.Type, err)
 		return nil, fmt.Errorf("ping failed: %w", err)
 	}
 
@@ -95,27 +99,37 @@ func (m *DBManager) connect(conn *model.Connection) (*sql.DB, error) {
 	m.pools[key] = db
 	m.mu.Unlock()
 
+	logger.Info("Connected to %s database '%s' successfully", conn.Type, conn.Database)
 	return db, nil
 }
 
 func (m *DBManager) Close(connID string) {
 	m.mu.Lock()
+	closed := 0
 	for key, db := range m.pools {
 		if key == connID || (len(key) > len(connID)+1 && key[:len(connID)+1] == connID+"/") {
 			db.Close()
 			delete(m.pools, key)
+			closed++
 		}
 	}
 	m.mu.Unlock()
+	if closed > 0 {
+		logger.Debug("Closed %d connection(s) for conn=%s", closed, connID)
+	}
 }
 
 func (m *DBManager) CloseAll() {
 	m.mu.Lock()
+	count := len(m.pools)
 	for id, db := range m.pools {
 		db.Close()
 		delete(m.pools, id)
 	}
 	m.mu.Unlock()
+	if count > 0 {
+		logger.Info("Closed all %d database connection(s)", count)
+	}
 }
 
 func (m *DBManager) Test(conn *model.Connection) error {

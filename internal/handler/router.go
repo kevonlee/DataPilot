@@ -6,20 +6,24 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+
+	"database-manager/internal/logger"
 )
 
-func NewRouter(webFS fs.FS, cfg *config.Config) *http.ServeMux {
+func NewRouter(webFS fs.FS, cfg *config.Config) http.Handler {
 	mux := http.NewServeMux()
 	auth := middleware.AuthMiddleware(cfg.JWTSecret)
 
 	// auth routes (no auth required)
 	mux.HandleFunc("/api/auth/login", handleLogin)
+	logger.Debug("Registered route: POST /api/auth/login")
 
 	// routes that require auth - wrap with auth middleware
 	mux.Handle("/api/auth/change-password", auth(http.HandlerFunc(handleChangePassword)))
 	mux.Handle("/api/connections", auth(http.HandlerFunc(handleConnections)))
 	mux.Handle("/api/connections/", auth(http.HandlerFunc(handleConnectionByID)))
 	mux.Handle("/api/conn/", auth(http.HandlerFunc(handleDBRoutes)))
+	logger.Debug("Registered auth-protected routes")
 
 	// SPA fallback handler
 	fileServer := http.FileServer(http.FS(webFS))
@@ -47,5 +51,6 @@ func NewRouter(webFS fs.FS, cfg *config.Config) *http.ServeMux {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	return mux
+	// wrap with logging middleware
+	return middleware.LoggingMiddleware(mux)
 }
