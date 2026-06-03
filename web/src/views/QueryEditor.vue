@@ -11,8 +11,8 @@
             :value="c.id"
           />
         </el-select>
-        <el-select v-model="selectedDb" placeholder="选择数据库" style="width: 150px" size="small" @change="onDbChange">
-          <el-option v-for="db in connStore.databases" :key="db" :label="db" :value="db" />
+        <el-select v-model="selectedDb" placeholder="选择数据库" style="width: 150px" size="small">
+          <el-option v-for="db in databases" :key="db" :label="db" :value="db" />
         </el-select>
       </div>
       <div class="toolbar-right">
@@ -133,6 +133,7 @@ const connStore = useConnectionStore()
 const editorRef = ref(null)
 const selectedConn = ref('')
 const selectedDb = ref('')
+const databases = ref([])
 const executing = ref(false)
 const result = ref(null)
 const resultHeight = ref(280)
@@ -142,9 +143,13 @@ let editor = null
 onMounted(async () => {
   await nextTick()
   initEditor()
+  // Use store state if available
   if (connStore.currentConn) {
     selectedConn.value = connStore.currentConn.id
-    loadDatabases()
+    await loadDatabases()
+    if (connStore.currentDb) {
+      selectedDb.value = connStore.currentDb
+    }
   }
 })
 
@@ -182,23 +187,17 @@ function initEditor() {
 watch(selectedConn, async (val) => {
   if (val) {
     await loadDatabases()
+    selectedDb.value = ''
   }
 })
 
 async function loadDatabases() {
   if (!selectedConn.value) return
   try {
-    await connStore.fetchDatabases(selectedConn.value)
-    if (connStore.databases.length > 0 && !selectedDb.value) {
-      selectedDb.value = connStore.databases[0]
-    }
+    databases.value = await connStore.fetchDatabases(selectedConn.value)
   } catch (e) {
     ElMessage.error('加载数据库列表失败')
   }
-}
-
-function onDbChange() {
-  connStore.setCurrentDb(selectedDb.value)
 }
 
 async function executeQuery() {

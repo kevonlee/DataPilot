@@ -6,7 +6,7 @@
         <el-select v-model="selectedConn" placeholder="连接" style="width: 160px" size="small">
           <el-option v-for="c in connStore.connections" :key="c.id" :label="c.name" :value="c.id" />
         </el-select>
-        <el-select v-model="selectedDb" placeholder="数据库" style="width: 130px" size="small" @change="loadTables">
+        <el-select v-model="selectedDb" placeholder="数据库" style="width: 130px" size="small" @change="onDbChange">
           <el-option v-for="db in databases" :key="db" :label="db" :value="db" />
         </el-select>
         <el-select v-model="selectedTable" placeholder="表" style="width: 130px" size="small" @change="loadData">
@@ -133,21 +133,22 @@ const editValue = ref('')
 watch(selectedConn, async (val) => {
   if (val) {
     try {
-      const res = await api.get(`/api/conn/${val}/databases`)
-      databases.value = res.data
+      databases.value = await connStore.fetchDatabases(val)
     } catch (e) {
       ElMessage.error('加载数据库列表失败')
     }
   }
 })
 
-async function loadTables() {
-  if (!selectedConn.value || !selectedDb.value) return
-  try {
-    const res = await api.get(`/api/conn/${selectedConn.value}/databases/${selectedDb.value}/tables`)
-    tables.value = res.data
-  } catch (e) {
-    ElMessage.error('加载表列表失败')
+async function onDbChange() {
+  selectedTable.value = ''
+  tables.value = []
+  if (selectedConn.value && selectedDb.value) {
+    try {
+      tables.value = await connStore.fetchTables(selectedConn.value, selectedDb.value)
+    } catch (e) {
+      ElMessage.error('加载表列表失败')
+    }
   }
 }
 
@@ -249,15 +250,23 @@ async function exportData() {
   }
 }
 
-onMounted(() => {
-  if (connStore.currentConn) selectedConn.value = connStore.currentConn.id
+onMounted(async () => {
+  // Initialize from store state
+  if (connStore.currentConn) {
+    selectedConn.value = connStore.currentConn.id
+    try {
+      databases.value = await connStore.fetchDatabases(selectedConn.value)
+    } catch {}
+  }
   if (connStore.currentDb) {
     selectedDb.value = connStore.currentDb
-    loadTables()
+    try {
+      tables.value = await connStore.fetchTables(selectedConn.value, selectedDb.value)
+    } catch {}
   }
   if (connStore.currentTable) {
     selectedTable.value = connStore.currentTable
-    loadData()
+    await loadData()
   }
 })
 </script>

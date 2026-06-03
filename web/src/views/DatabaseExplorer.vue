@@ -170,12 +170,11 @@
 
 <script setup>
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { useConnectionStore } from '../stores'
 import { api } from '../stores'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-const router = useRouter()
+const emit = defineEmits(['navigate'])
 const connStore = useConnectionStore()
 const treeRef = ref(null)
 const showAddDialog = ref(false)
@@ -294,9 +293,9 @@ function handleNodeClick(data) {
 function handleNodeDblClick(data) {
   setContext(data)
   if (data.type === 'table') {
-    router.push('/table-data')
+    emit('navigate', 'table-data')
   } else if (data.type === 'database') {
-    router.push('/query')
+    emit('navigate', 'query')
   }
 }
 
@@ -320,16 +319,16 @@ function handleMenuAction(action) {
 
   switch (action) {
     case 'query':
-      router.push('/query')
+      emit('navigate', 'query')
       break
     case 'data':
-      router.push('/table-data')
+      emit('navigate', 'table-data')
       break
     case 'structure':
-      router.push('/table-structure')
+      emit('navigate', 'table-structure')
       break
     case 'export':
-      router.push('/import-export')
+      emit('navigate', 'import-export')
       break
     case 'copy':
       navigator.clipboard?.writeText(data.tableName || data.dbName || data.label)

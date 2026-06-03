@@ -19,7 +19,7 @@
 
       <!-- 数据库浏览器 -->
       <div class="sidebar-content">
-        <DatabaseExplorer />
+        <DatabaseExplorer @navigate="addTab" />
       </div>
 
       <!-- 侧边栏底部 -->
@@ -61,11 +61,11 @@
       <div class="tab-bar">
         <div class="tab-list">
           <div
-            v-for="tab in tabs"
+            v-for="tab in openTabs"
             :key="tab.name"
             class="tab-item"
             :class="{ active: activeTab === tab.name }"
-            @click="activeTab = tab.name"
+            @click="switchTab(tab.name)"
           >
             <el-icon class="tab-icon"><component :is="tab.icon" /></el-icon>
             <span class="tab-label">{{ tab.title }}</span>
@@ -105,26 +105,79 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore, useConnectionStore } from '../stores'
 import { api } from '../stores'
 import { ElMessage } from 'element-plus'
 import DatabaseExplorer from './DatabaseExplorer.vue'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 const connStore = useConnectionStore()
 
-const activeTab = ref('connections')
-const tabs = ref([
-  { name: 'connections', title: '连接管理', icon: 'Connection', closable: false },
-  { name: 'query', title: 'SQL 查询', icon: 'Edit', closable: true },
-  { name: 'table-data', title: '表数据', icon: 'Grid', closable: true },
-  { name: 'structure', title: '表结构', icon: 'Document', closable: true },
-  { name: 'import-export', title: '导入导出', icon: 'Download', closable: true },
-  { name: 'dashboard', title: '数据概览', icon: 'DataAnalysis', closable: true }
+// Tab definitions
+const tabDefs = {
+  connections: { title: '连接管理', icon: 'Connection', closable: false, path: '/connections' },
+  query: { title: 'SQL 查询', icon: 'Edit', closable: true, path: '/query' },
+  'table-data': { title: '表数据', icon: 'Grid', closable: true, path: '/table-data' },
+  'table-structure': { title: '表结构', icon: 'Document', closable: true, path: '/table-structure' },
+  'import-export': { title: '导入导出', icon: 'Download', closable: true, path: '/import-export' },
+  dashboard: { title: '数据概览', icon: 'DataAnalysis', closable: true, path: '/dashboard' }
+}
+
+// Open tabs list - always starts with connections
+const openTabs = ref([
+  { name: 'connections', ...tabDefs.connections }
 ])
+
+// Active tab name - derived from current route
+const activeTab = computed({
+  get() {
+    // Find tab matching current route
+    const name = Object.keys(tabDefs).find(k => route.path === tabDefs[k].path)
+    return name || 'connections'
+  },
+  set(val) {
+    // When set, navigate to that route
+    const def = tabDefs[val]
+    if (def) router.push(def.path)
+  }
+})
+
+// Sync route changes to tabs - auto-add tab when route changes
+watch(() => route.path, (path) => {
+  const name = Object.keys(tabDefs).find(k => path === tabDefs[k].path)
+  if (name && !openTabs.value.find(t => t.name === name)) {
+    openTabs.value.push({ name, ...tabDefs[name] })
+  }
+}, { immediate: true })
+
+function switchTab(name) {
+  const def = tabDefs[name]
+  if (def) router.push(def.path)
+}
+
+function addTab(name) {
+  if (!tabDefs[name]) return
+  if (!openTabs.value.find(t => t.name === name)) {
+    openTabs.value.push({ name, ...tabDefs[name] })
+  }
+  router.push(tabDefs[name].path)
+}
+
+function removeTab(name) {
+  const idx = openTabs.value.findIndex(t => t.name === name)
+  if (idx >= 0 && openTabs.value[idx].closable) {
+    openTabs.value.splice(idx, 1)
+    // If removing active tab, switch to nearest
+    if (activeTab.value === name) {
+      const next = openTabs.value[Math.min(idx, openTabs.value.length - 1)]
+      if (next) router.push(tabDefs[next.name].path)
+    }
+  }
+}
 
 const sidebarWidth = ref(280)
 const showPasswordDialog = ref(false)
@@ -149,36 +202,6 @@ async function changePassword() {
     ElMessage.error(e.response?.data?.error || '修改失败')
   }
 }
-
-function addTab(name, title, icon) {
-  if (!tabs.value.find(t => t.name === name)) {
-    tabs.value.push({ name, title, icon, closable: true })
-  }
-  activeTab.value = name
-  // 根据 tab 名称导航
-  const routeMap = {
-    'connections': '/connections',
-    'query': '/query',
-    'table-data': '/table-data',
-    'structure': '/table-structure',
-    'import-export': '/import-export',
-    'dashboard': '/dashboard'
-  }
-  router.push(routeMap[name] || '/')
-}
-
-function removeTab(name) {
-  const idx = tabs.value.findIndex(t => t.name === name)
-  if (idx >= 0 && tabs.value[idx].closable) {
-    tabs.value.splice(idx, 1)
-    if (activeTab.value === name) {
-      activeTab.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.name || 'connections'
-    }
-  }
-}
-
-// 暴露 addTab 给子组件
-window.__addTab = addTab
 
 let resizing = false
 function startResize(e) {

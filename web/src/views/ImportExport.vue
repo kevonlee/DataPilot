@@ -16,7 +16,7 @@
                   </el-select>
                 </el-form-item>
                 <el-form-item label="数据库">
-                  <el-select v-model="exportForm.database" placeholder="选择数据库" style="width: 100%" @change="loadExportTables">
+                  <el-select v-model="exportForm.database" placeholder="选择数据库" style="width: 100%" @change="onExportDbChange">
                     <el-option v-for="db in exportDatabases" :key="db" :label="db" :value="db" />
                   </el-select>
                 </el-form-item>
@@ -162,22 +162,28 @@ const importForm = reactive({
 
 watch(() => exportForm.connId, async (val) => {
   if (val) {
-    const res = await api.get(`/api/conn/${val}/databases`)
-    exportDatabases.value = res.data
+    try {
+      exportDatabases.value = await connStore.fetchDatabases(val)
+    } catch {}
   }
 })
 
 watch(() => importForm.connId, async (val) => {
   if (val) {
-    const res = await api.get(`/api/conn/${val}/databases`)
-    importDatabases.value = res.data
+    try {
+      importDatabases.value = await connStore.fetchDatabases(val)
+    } catch {}
   }
 })
 
-async function loadExportTables() {
-  if (!exportForm.connId || !exportForm.database) return
-  const res = await api.get(`/api/conn/${exportForm.connId}/databases/${exportForm.database}/tables`)
-  exportTables.value = res.data
+async function onExportDbChange() {
+  exportForm.table = ''
+  exportTables.value = []
+  if (exportForm.connId && exportForm.database) {
+    try {
+      exportTables.value = await connStore.fetchTables(exportForm.connId, exportForm.database)
+    } catch {}
+  }
 }
 
 async function doExport() {
@@ -259,7 +265,7 @@ function convertToSQL(result, tableName) {
   let sql = ''
   result.rows.forEach(row => {
     const cols = result.columns.map(c => `\`${c}\``).join(', ')
-    const vals = row.map(v => v === null ? 'NULL' : typeof v === 'string' ? `'${v.replace(/'/g, "\\'")}'` : v).join(', ')
+    const vals = row.map(v => v === null ? 'NULL' : typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : v).join(', ')
     sql += `INSERT INTO \`${tableName || 'table'}\` (${cols}) VALUES (${vals});\n`
   })
   return sql
